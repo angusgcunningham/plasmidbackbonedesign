@@ -1,4 +1,4 @@
-```markdown
+
 # Plasmid Backbone Design with DNA Language Models
 
 > Clean, reproducible code for end-to-end *E. coli* plasmid backbone generation and QC using a DNA language model.
