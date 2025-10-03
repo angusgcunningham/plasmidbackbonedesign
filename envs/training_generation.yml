@@ -1,0 +1,17 @@
+name: clean-env
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - cpuonly
+  - torchaudio
+  - ipykernel
+  - notebook
+  - blast
+  - plannotate
+  - cudatoolkit=11.8
+  - transformers
+  - nbformat
+prefix: /cs/student/projects1/aibh/2024/acunning/miniconda3/envs/clean-env

@@ -1,0 +1,164 @@
+---
+ARGnet generation
+
+python /cs/student/projects1/aibh/2024/acunning/ARGNet/scripts/argnet.py --input /cs/student/projects1/aibh/2024/acunning/Projects/Data/dataset/debug_fasta/COMPASS_AF197335.1.fasta  --type nt --model argnet-l  --outname argnettest1.txt
+
+---
+plasmidqc script
+
+INDIR="/cs/student/projects1/aibh/2024/acunning/Projects/Results/gen_ft35kgfp"
+WORKROOT="/cs/student/projects1/aibh/2024/acunning/qc_batch"
+ORIV_REF="/cs/student/projects1/aibh/2024/acunning/oriV_refs.fasta"
+ORIV_DB_PREFIX="/cs/student/projects1/aibh/2024/acunning/oriV_db"   # you prebuilt this with makeblastdb
+SCRIPT="/cs/student/projects1/aibh/2024/acunning/Projects/Analysis/plasmidqc.py"
+mkdir -p "$WORKROOT"
+
+# script
+
+for f in "$INDIR"/*.fasta "$INDIR"/*.fa; do
+  [ -e "$f" ] || continue           # skip if no matches
+  b=$(basename "$f"); b="${b%.*}"
+  w="$WORKROOT/$b"
+  mkdir -p "$w"
+
+  # reuse shared BLAST DB by symlinking into the workdir
+  ln -sf "${ORIV_DB_PREFIX}.nhr" "$w/oriV_db.nhr"
+  ln -sf "${ORIV_DB_PREFIX}.nin" "$w/oriV_db.nin"
+  ln -sf "${ORIV_DB_PREFIX}.nsq" "$w/oriV_db.nsq"
+
+  # run plasmidqc (uses existing DB, so it won’t rebuild)
+  python "$SCRIPT" \
+    --fasta "$f" \
+    --workdir "$w" \
+    --oriv_ref "$ORIV_REF" \
+    --arg_tool amrfinder
+done
+
+(
+  head -n 1 "$WORKROOT"/*/plasmid_qc_summary.tsv | head -n 1
+  for s in "$WORKROOT"/*/plasmid_qc_summary.tsv; do tail -n +2 "$s"; done
+) > "$WORKROOT/_combined_plasmid_qc_summary.tsv"
+
+python - <<'PY'
+import glob, pandas as pd, os, sys
+workroot = os.environ.get("WORKROOT", "/cs/student/projects1/aibh/2024/acunning/qc_batch")
+rows=[]
+for p in glob.glob(f'{workroot}/*/oriv_candidates.tsv'):
+    df=pd.read_csv(p, sep='\t')
+    df.insert(0,'plasmid_id',os.path.basename(os.path.dirname(p)))
+    rows.append(df)
+if rows:
+    out=pd.concat(rows, ignore_index=True)
+    out.to_csv(f'{workroot}/_combined_oriv_candidates.tsv', sep='\t', index=False)
+    print('Wrote', f'{workroot}/_combined_oriv_candidates.tsv', 'rows:', len(out))
+else:
+    print('No candidate files found', file=sys.stderr)
+PY
+
+
+---
+plasmidqc2 run
+---
+
+INDIR="/cs/student/projects1/aibh/2024/acunning/Projects/Results/gen_ft35kgfp3"
+WORKROOT="/cs/student/projects1/aibh/2024/acunning/Projects/Results/qc_batch/qc_ft35k3"
+ORIV_DB_PREFIX="/cs/student/projects1/aibh/2024/acunning/oriV_db"  
+SCRIPT="/cs/student/projects1/aibh/2024/acunning/Projects/Analysis/plasmidqc2.py"
+
+for f in "$INDIR"/*.fasta "$INDIR"/*.fa; do
+  [ -e "$f" ] || continue
+  b=$(basename "$f"); b="${b%.*}"
+  python "$SCRIPT" \
+    --fasta "$f" \
+    --workdir "$WORKROOT/$b" \
+    --oriv_db_prefix "$ORIV_DB_PREFIX" \
+    --arg_tool amrfinder \
+    --blast_task dc-megablast
+done
+
+
+python - <<'PY'
+import glob, pandas as pd
+root="/cs/student/.../qc_batch/qc_ft35k3"
+dfs=[pd.read_csv(f, sep="\t") for f in sorted(glob.glob(f"{root}/*/plasmid_qc_summary.tsv"))]
+if dfs:
+  out=pd.concat(dfs, ignore_index=True)
+  out.to_csv(f"{root}/_combined_plasmid_qc_summary.tsv", sep="\t", index=False)
+  print("Wrote:", f"{root}/_combined_plasmid_qc_summary.tsv", "rows:", len(out))
+else:
+  print("No per-plasmid summaries found.")
+PY
+
+############################
+# summarize_plannotate_gbk.py
+############################
+python /cs/student/projects1/aibh/2024/acunning/Projects/Analysis/summarize_plannotate_gbk.py \
+  "/cs/student/projects1/aibh/2024/acunning/Projects/Results/plannotate/plan_ft15kgfp_p" \
+  --outdir "/cs/student/projects1/aibh/2024/acunning/Projects/Results/plannotate/summaries15k" \
+  --ext .gb .gbk \
+  --min_identity 95 --min_coverage 80 --exclude_fragments
+
+############################
+# tmux training export
+############################
+
+tmux capture-pane -S - -E - -p > <path_to_output_file.txt>
+
+############################
+# repeats
+############################
+
+python /cs/student/projects1/aibh/2024/acunning/Projects/Analysis/repeats.py /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/outputs \
+  --circular \
+  --out /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/mcclain_repeats.csv
+
+############################
+# apply_repeat_gate.py
+############################
+
+python /cs/student/projects1/aibh/2024/acunning/Projects/Analysis/apply_repeat_gate.py \
+  --passed_csv /cs/student/projects1/aibh/2024/acunning/Projects/Results/qc_out_gfp/casestudy/ft15pass_exact1ori1arg.csv \
+  --failed_csv /cs/student/projects1/aibh/2024/acunning/Projects/Results/qc_out_gfp/casestudy/ft15fail_exact1ori1arg.csv \
+  --repeats_csv /cs/student/projects1/aibh/2024/acunning/Projects/Results/repeats_csvs/gen_ft15_gfp_repeats.csv \
+  --repeat_max_len 50 \
+  --reason_text "repeat > 50"
+
+#########################
+# qc_oriv_arg2
+
+python /cs/student/projects1/aibh/2024/acunning/Projects/Analysis/qc_oriv_arg2.py \
+  --in /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/outputs \
+  --outdir /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/qc \
+  --oridb_prefix /cs/student/projects1/aibh/2024/acunning/oriV_db \
+  --oridb_ref /cs/student/projects1/aibh/2024/acunning/oriV_refs.fasta \
+  --min_pident 85 --min_scovs 80 --min_len 100 --threads 8
+
+#########################
+# filter_qc
+#########################
+
+python /cs/student/projects1/aibh/2024/acunning/Projects/Analysis/filter_qc.py \
+  --qc_out /cs/student/projects1/aibh/2024/acunning/Projects/Results/qc_out_gfp/qc_out_base \
+  --out_pass /cs/student/projects1/aibh/2024/acunning/Projects/Results/qc_out_gfp/casestudy/ft15pass_exact1ori1arg.csv \
+  --out_fail /cs/student/projects1/aibh/2024/acunning/Projects/Results/qc_out_gfp/casestudy/ft15fail_exact1ori1arg.csv \
+  --ori_min_identity 85 --ori_min_cov 80 \
+  --amr_min_identity 85 --amr_min_cov 80 \
+  --ori_count_min 1 --ori_count_max 1 \
+  --amr_count_min 1 --amr_count_max 1
+
+#########################
+# filter_qc_two_stage
+#########################
+
+python /cs/student/projects1/aibh/2024/acunning/Projects/Analysis/filter_qc_two_stage.py \
+  --qc_out   /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/qc \
+  --out_pass /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/qc/passed/pass_1ori1arg.csv \
+  --out_fail /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/qc/passed/pass_1ori1arg.csv \
+  --ori_low_identity 85 --ori_low_cov 80 \
+  --amr_low_identity 85 --amr_low_cov 80 \
+  --ori_low_count_min 1 --ori_low_count_max 1 \
+  --amr_low_count_min 1 --amr_low_count_max 1 \
+  --ori_strict_identity 85 --ori_strict_cov 85 \
+  --amr_strict_identity 85 --amr_strict_cov 85 \
+  --repeats_csv /cs/student/projects1/aibh/2024/acunning/Projects/Results/mcclain/mcclain_repeats.csv \
+  --repeat_max_len 50 --repeat_ge
