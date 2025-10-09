@@ -57,14 +57,15 @@ qc/                 # Two-stage QC, repeats, similarity scoring
 training/           # Training & generation scripts
 notebooks/            # Reproducible EDA/figure notebooks
 envs/                 # Two conda environments (training/generation & QC)
-docs/                 # Short notes / optional project docs
+docs/                 # Short notes
 
 ````
 
 ### Highlights
+- **Fine-tuning** with optimal gpu usage and plasmid wrap around
+- **Generation** with circular stopping criteria
 - **Two-stage QC** with configurable thresholds (counts, identity, coverage, repeat caps).
 - **Repeat-aware filtering** to block synthesis-unfriendly candidates early.
-- **K-mer & annotation** helpers to check realism shifts after prompting or FT.
 - **Separated environments** for training vs QC (keeps deps lean and stable).
 
 ---
@@ -146,37 +147,114 @@ conda activate training-generation
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
 # Example: base model sampling
-python src/training/generate_base.py \
-  --out /path/to/out/generated_base.fasta \
-  --max-length 4000 \
-  --temperature 1.0 \
-  --num-seqs 1000
+python src/training/generate_base.py
 ```
 
 You can also use `generate_base2.py` or `generate_ft4.py` depending on your workflow.
 
+base takes in .pt model, ft takes in output weights
 ---
 
-### 3) Run QC filters
+### 3) Run QC Pipeline
+
+> Ensure your plasmid FASTA sequences are ready and you’ve created the two conda environments (`training_generation` and `plasmid_qc`).  
+> All scripts assume you’re inside the repo root and that `src/` is on your `PYTHONPATH`:
+> ```bash
+> export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
+> ```
+
+---
+
+### Run ORI / ARG detection — `qc_oriv_arg2.py`
+
+This script performs BLAST-based identification of replication origins (ORI) and antibiotic-resistance genes (ARG).
 
 ```bash
 conda activate plasmid-qc
-export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-# Two-stage QC on a FASTA of candidates
-python src/qc/filter_qc_two_stage.py \
-  --input /path/to/out/generated_base.fasta \
-  --out   /path/to/qc_out/ \
-  --strict
-```
+python src/qc/qc_oriv_arg2.py \
+  --in results/generated_sequences \
+  --outdir results/qc_stage1 \
+  --oridb_prefix data/origin_database/oridb \
+  --oridb_ref data/origin_database/oridb_refs.fasta \
+  --min_pident 85 \
+  --min_scovs 80 \
+  --min_len 100 \
+  --threads 8
+````
 
-This will:
+**Inputs**
 
-* annotate/detect ORIs and ARGs,
-* compute repeat stats,
-* write **CSV summaries** and a **passed FASTA** into the `--out` directory (outside the repo).
+* `--in` → folder of FASTA sequences to QC
+* `--oridb_prefix` / `--oridb_ref` → your ORI reference database files
+* Optional tuning: `--min_pident`, `--min_scovs`, `--min_len`, `--threads`
+
+**Outputs**
+
+* Annotated QC tables written under `results/qc_stage1/`
+* CSV with ORI/ARG hits, coverage, and identity stats per plasmid
 
 ---
+
+### Detect repeat regions — `repeats.py`
+
+Detect and quantify long internal repeats within generated plasmids (important for synthesis feasibility).
+
+```bash
+python src/qc/repeats.py \
+  results/generated_sequences \
+  --circular \
+  --out results/repeats_summary/repeats.csv
+```
+
+**Inputs**
+
+* Path to directory or single FASTA file
+* `--circular` treats sequences as circular (wrap-around search)
+
+**Outputs**
+
+* `repeats.csv` containing longest repeat lengths per plasmid
+
+---
+
+### Apply two-stage QC filters — `filter_qc_two_stage.py`
+
+Combine ORI/ARG metrics and repeat data to classify plasmids as pass/fail under both broad and strict thresholds.
+
+```bash
+python src/qc/filter_qc_two_stage.py \
+  --qc_out   results/qc_stage1 \
+  --out_pass results/qc_final/passed/pass_1ori1arg.csv \
+  --out_fail results/qc_final/failed/fail_1ori1arg.csv \
+  --ori_low_identity 85 --ori_low_cov 80 \
+  --amr_low_identity 85 --amr_low_cov 80 \
+  --ori_low_count_min 1 --ori_low_count_max 1 \
+  --amr_low_count_min 1 --amr_low_count_max 1 \
+  --ori_strict_identity 95 --ori_strict_cov 95 \
+  --amr_strict_identity 99 --amr_strict_cov 99 \
+  --repeats_csv results/repeats_summary/repeats.csv \
+  --repeat_max_len 50
+```
+
+**Inputs**
+
+* `--qc_out` → folder produced by `qc_oriv_arg2.py`
+* `--repeats_csv` → output from `repeats.py`
+
+**Outputs**
+
+* `pass_1ori1arg.csv` → plasmids passing all criteria
+* `fail_1ori1arg.csv` → plasmids failing any threshold
+* Both located under `results/qc_final/`
+
+---
+
+**Summary Workflow**
+
+```
+FASTA → qc_oriv_arg2.py → repeats.py → filter_qc_two_stage.py → passed/failed CSVs
+```
 
 ### 4) Analyse results & make figures
 
