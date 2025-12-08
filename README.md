@@ -3,7 +3,7 @@
 
 > Clean, reproducible code for end-to-end *E. coli* plasmid backbone generation and QC using a DNA language model.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC--BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](#requirements)
 [![Conda Envs](https://img.shields.io/badge/conda-2%20envs-44A833.svg)](#environments)
 [![Reproducible](https://img.shields.io/badge/reproducible-yes-4A90E2.svg)](#reproducibility)
@@ -351,7 +351,8 @@ If this code or pipeline helps your work, please cite:
 
 ## License
 
-This project is released under the **MIT License**. See [LICENSE](LICENSE).
+This project is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0).  
+See the [LICENSE](./LICENSE) file for details.
 
 ---
 
