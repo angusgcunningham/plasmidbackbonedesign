@@ -7,6 +7,7 @@ import re
 
 # ---------- ID normalization (robust across files/headers/paths) ----------
 _EXT_RE = re.compile(r"\.(fa|fasta|fna|fas|gbk|gb|fa\.gz|fasta\.gz|fna\.gz|fas\.gz)$", re.IGNORECASE)
+
 def _basename_no_ext(x: str) -> str:
     x = str(x).strip()
     x = Path(x).name
@@ -17,6 +18,15 @@ def _basename_no_ext(x: str) -> str:
 
 def _norm_id(x: str) -> str:
     return _basename_no_ext(x).lower()
+
+def _guess_id_col(df: pd.DataFrame, prefs=("sample","Plasmid_ID","plasmid_id","sequence","id","name")) -> str:
+    """Guess an ID column in qc_summary or similar."""
+    cols_lower = {c.lower(): c for c in df.columns}
+    for p in prefs:
+        if p.lower() in cols_lower:
+            return cols_lower[p.lower()]
+    # fallback: first column
+    return df.columns[0]
 
 # ---------- loaders ----------
 def _load_oris(ori_csv: Path) -> pd.DataFrame:
@@ -57,7 +67,7 @@ def _load_repeats_map(repeats_csv: Path) -> dict[str, float]:
     if "longest_len" not in df.columns and "longest_len" not in cols_lower:
         raise ValueError("Repeats CSV must contain a 'longest_len' column.")
     if "longest_len" not in df.columns and "longest_len" in cols_lower:
-        df = df.rename(columns={cols_lower["longest_len"]:"longest_len"})
+        df = df.rename(columns={cols_lower["longest_len"]: "longest_len"})
 
     df["longest_len"] = pd.to_numeric(df["longest_len"], errors="coerce")
 
@@ -70,7 +80,7 @@ def _load_repeats_map(repeats_csv: Path) -> dict[str, float]:
     rep_map: dict[str, float] = {}
     for _, r in df.iterrows():
         L = r.get("longest_len", np.nan)
-        if pd.isna(L): 
+        if pd.isna(L):
             continue
         for k in {str(r.get("_idnorm_from_col","")), str(r.get("_idnorm_from_file",""))} - {""}:
             if (k not in rep_map) or (L > rep_map[k]):
@@ -105,6 +115,8 @@ def two_stage_filter(
     # Stage-B (strict) thresholds:
     ori_strict_id: float, ori_strict_cov: float,
     amr_strict_id: float, amr_strict_cov: float,
+    amr_strict_min: int | None,
+    amr_strict_all: bool,
     # Repeats gate:
     repeats_csv: Path | None,
     repeat_max_len: int,
@@ -118,8 +130,20 @@ def two_stage_filter(
     adf = _load_amrs(amr_csv)
     rep_map = _load_repeats_map(repeats_csv) if repeats_csv else {}
 
-    plasmids = sorted(set(odf.get("sequence", pd.Series([], dtype=str))).union(
-                      set(adf.get("sequence", pd.Series([], dtype=str)))))
+    # Base set of plasmids: from ORI/AMR aggregates
+    plasmids = set(odf.get("sequence", pd.Series([], dtype=str))).union(
+               set(adf.get("sequence", pd.Series([], dtype=str))))
+
+    # Also include any samples from qc_summary that had no ORI/ARG calls
+    if qc_out.is_dir():
+        summary_csv = qc_out / "qc_summary.csv"
+        if summary_csv.exists() and summary_csv.stat().st_size > 0:
+            sdf = pd.read_csv(summary_csv)
+            id_col = _guess_id_col(sdf)
+            extra_ids = set(sdf[id_col].astype(str))
+            plasmids |= extra_ids
+
+    plasmids = sorted(plasmids)
 
     passed_rows, failed_rows = [], []
 
@@ -131,16 +155,38 @@ def two_stage_filter(
             o_all = o_all.sort_values(["q_start","q_end"])
 
         # ---------- Stage-A (low thresholds) ----------
-        o_low = o_all[(o_all["pct_identity"] >= ori_low_id) & (o_all["pct_cov_subject"] >= ori_low_cov)] if not o_all.empty else o_all
-        a_low = a_all[(a_all["pct_identity"] >= amr_low_id) & (a_all["pct_cov"]      >= amr_low_cov)]    if not a_all.empty else a_all
+        if not o_all.empty:
+            o_low = o_all[(o_all["pct_identity"] >= ori_low_id) &
+                          (o_all["pct_cov_subject"] >= ori_low_cov)]
+        else:
+            o_low = o_all
+
+        if not a_all.empty:
+            a_low = a_all[(a_all["pct_identity"] >= amr_low_id) &
+                          (a_all["pct_cov"]      >= amr_low_cov)]
+        else:
+            a_low = a_all
+
         n_ori_low = len(o_low)
         n_amr_low = len(a_low)
 
         reasons = []
-        if not (ori_low_count_min <= n_ori_low <= ori_low_count_max):
-            reasons.append(f"ORI low-threshold count {n_ori_low} outside [{ori_low_count_min},{ori_low_count_max}]")
-        if not (amr_low_count_min <= n_amr_low <= amr_low_count_max):
-            reasons.append(f"ARG low-threshold count {n_amr_low} outside [{amr_low_count_min},{amr_low_count_max}]")
+
+        # If absolutely no ORI and no ARG at all (even before thresholds), flag explicitly
+        if o_all.empty and a_all.empty:
+            reasons.append("No ORI; No ARG")
+        else:
+            # apply low-stage count window rules
+            if not (ori_low_count_min <= n_ori_low <= ori_low_count_max):
+                reasons.append(
+                    f"ORI low-threshold count {n_ori_low} outside "
+                    f"[{ori_low_count_min},{ori_low_count_max}]"
+                )
+            if not (amr_low_count_min <= n_amr_low <= amr_low_count_max):
+                reasons.append(
+                    f"ARG low-threshold count {n_amr_low} outside "
+                    f"[{amr_low_count_min},{amr_low_count_max}]"
+                )
 
         # ---------- Repeats gate (always evaluated) ----------
         rep_reason = ""
@@ -151,6 +197,7 @@ def two_stage_filter(
                 if (repeat_ge and L >= repeat_max_len) or ((not repeat_ge) and L > repeat_max_len):
                     rep_reason = f"repeat {'≥' if repeat_ge else '>'} {repeat_max_len}"
 
+        # If Stage-A already failed or no ORI/ARG, record + continue
         if reasons:
             if rep_reason:
                 reasons.append(rep_reason)
@@ -158,18 +205,48 @@ def two_stage_filter(
             continue
 
         # ---------- Stage-B (strict thresholds) ----------
-        o_strict = o_all[(o_all["pct_identity"] >= ori_strict_id) & (o_all["pct_cov_subject"] >= ori_strict_cov)] if not o_all.empty else o_all
-        a_strict = a_all[(a_all["pct_identity"] >= amr_strict_id) & (a_all["pct_cov"]      >= amr_strict_cov)]    if not a_all.empty else a_all
+        if not o_all.empty:
+            o_strict = o_all[(o_all["pct_identity"] >= ori_strict_id) &
+                             (o_all["pct_cov_subject"] >= ori_strict_cov)]
+        else:
+            o_strict = o_all
+
+        if not a_all.empty:
+            a_strict = a_all[(a_all["pct_identity"] >= amr_strict_id) &
+                             (a_all["pct_cov"]      >= amr_strict_cov)]
+        else:
+            a_strict = a_all
+
         n_ori_strict = len(o_strict)
         n_amr_strict = len(a_strict)
 
-        need_ori = (ori_low_count_min == ori_low_count_max == 1)
-        need_amr = (amr_low_count_min == amr_low_count_max == 1)
+        # ORI strict rule: at least low-stage minimum must survive strict
+        if n_ori_strict < ori_low_count_min:
+            reasons.append(
+                f"ORI strict count {n_ori_strict} < required {ori_low_count_min} "
+                f"(ID≥{ori_strict_id}, Cov≥{ori_strict_cov})"
+            )
 
-        if need_ori and n_ori_strict < 1:
-            reasons.append(f"ORI strict threshold not met (ID≥{ori_strict_id}, Cov≥{ori_strict_cov})")
-        if need_amr and n_amr_strict < 1:
-            reasons.append(f"ARG strict threshold not met (ID≥{amr_strict_id}, Cov≥{amr_strict_cov})")
+        # ARG base strict rule: at least low-stage minimum must survive strict
+        if n_amr_strict < amr_low_count_min:
+            reasons.append(
+                f"ARG strict count {n_amr_strict} < required {amr_low_count_min} "
+                f"(ID≥{amr_strict_id}, Cov≥{amr_strict_cov})"
+            )
+
+        # ARG strict policy (optional extra constraints)
+        if amr_strict_all:
+            if n_amr_strict != n_amr_low:
+                reasons.append(
+                    f"ARG strict policy 'all' failed: {n_amr_strict}/{n_amr_low} meet strict "
+                    f"(ID≥{amr_strict_id}, Cov≥{amr_strict_cov})"
+                )
+        elif amr_strict_min is not None:
+            if n_amr_strict < amr_strict_min:
+                reasons.append(
+                    f"ARG strict policy 'min {amr_strict_min}' failed: only {n_amr_strict} meet strict "
+                    f"(ID≥{amr_strict_id}, Cov≥{amr_strict_cov})"
+                )
 
         # If strict fail OR repeats fail, record fail
         if reasons or rep_reason:
@@ -182,6 +259,7 @@ def two_stage_filter(
         ori_names = o_strict["ori_type"].fillna("").astype(str).tolist() if not o_strict.empty else []
         ori_ids   = o_strict["pct_identity"].tolist() if not o_strict.empty else []
         ori_covs  = o_strict["pct_cov_subject"].tolist() if not o_strict.empty else []
+
         if not a_strict.empty:
             labels = a_strict["symbol"] if "symbol" in a_strict.columns else a_strict.get("name", pd.Series([], dtype=str))
             labels = labels.fillna("").astype(str).tolist()
@@ -206,7 +284,8 @@ def two_stage_filter(
 # ---------- CLI ----------
 def parse_args():
     ap = argparse.ArgumentParser(
-        description="Two-stage QC with optional repeat gate: (A) count with low thresholds, (B) validate with strict thresholds, (C) fail on long repeats."
+        description="Two-stage QC with optional repeat gate: (A) count with low thresholds, "
+                    "(B) validate with strict thresholds, (C) fail on long repeats."
     )
     ap.add_argument("--qc_out", required=True,
                     help="Folder with aggregate_ori_calls.csv & aggregate_amr_calls.csv, or a single ori CSV path")
@@ -225,18 +304,28 @@ def parse_args():
     ap.add_argument("--amr_low_count_min", type=int, default=1)
     ap.add_argument("--amr_low_count_max", type=int, default=1)
 
-    # Stage-B (strict) thresholds to validate the singletons
+    # ARG strict policies (on top of base rule)
+    ap.add_argument("--amr_strict_min", type=int, default=None,
+                    help="Require at least this many ARGs to meet strict thresholds (unset = no extra minimum)")
+    ap.add_argument("--amr_strict_all", action="store_true",
+                    help="Require ALL low-threshold ARGs to meet strict thresholds")
+
+    # Stage-B (strict) thresholds to validate hits
     ap.add_argument("--ori_strict_identity", type=float, default=99.0)
     ap.add_argument("--ori_strict_cov",      type=float, default=99.0)
     ap.add_argument("--amr_strict_identity", type=float, default=100.0)
     ap.add_argument("--amr_strict_cov",      type=float, default=100.0)
 
     # Repeats gate (optional)
-    ap.add_argument("--repeats_csv", type=str, default=None, help="CSV with columns including longest_len and plasmid_id/file")
-    ap.add_argument("--repeat_max_len", type=int, default=50, help="Fail if longest repeat meets/exceeds this")
+    ap.add_argument("--repeats_csv", type=str, default=None,
+                    help="CSV with columns including longest_len and plasmid_id/file")
+    ap.add_argument("--repeat_max_len", type=int, default=50,
+                    help="Fail if longest repeat meets/exceeds this")
     grp = ap.add_mutually_exclusive_group()
-    grp.add_argument("--repeat_ge", action="store_true", help="Fail if longest_len ≥ repeat_max_len (default)")
-    grp.add_argument("--repeat_gt", action="store_true", help="Fail if longest_len > repeat_max_len")
+    grp.add_argument("--repeat_ge", action="store_true",
+                    help="Fail if longest_len ≥ repeat_max_len (default)")
+    grp.add_argument("--repeat_gt", action="store_true",
+                    help="Fail if longest_len > repeat_max_len")
 
     ap.add_argument("--digits", type=int, default=2)
     return ap.parse_args()
@@ -261,6 +350,8 @@ if __name__ == "__main__":
         ori_strict_cov=args.ori_strict_cov,
         amr_strict_id=args.amr_strict_identity,
         amr_strict_cov=args.amr_strict_cov,
+        amr_strict_min=args.amr_strict_min,
+        amr_strict_all=args.amr_strict_all,
         repeats_csv=Path(args.repeats_csv) if args.repeats_csv else None,
         repeat_max_len=args.repeat_max_len,
         repeat_ge=repeat_ge,

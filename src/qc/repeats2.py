@@ -4,16 +4,18 @@ Batch longest-repeat scan over many FASTA files.
 
 - Walk a directory (or accept a single file) and, for each FASTA record,
   compute the longest exact repeated region using max_repeats.find_longest_repeats.
+- Optionally also detect the longest inverted (reverse-complement) exact repeat.
 - Write a CSV summarizing each record.
 
 Usage:
-  python batch_longest_repeats.py /path/to/fasta_dir --circular --out longest_repeats.csv
+  python repeats2.py /path/to/fasta_dir --circular --out longest_repeats.csv
 
 Options:
   --suffixes ".fa,.fasta,.fna"    File extensions to include (comma-separated)
   --circular                      Treat sequences as circular (wrap-around)
   --min-len 2                     (Only affects the 'top' list in max_repeats; 'longest' is independent.)
   --omit-seq                      Do not include the repeat sequence itself in the CSV
+  --include-reverse               Also detect inverted (reverse-complement) exact repeats
 """
 
 import argparse
@@ -22,7 +24,6 @@ import gzip
 import os
 from pathlib import Path
 from typing import Iterator, Tuple, List, Dict
-
 
 # ── FASTA reader (minimal) ───────────────────────────────────────────────
 def read_fasta_simple(path: str):
@@ -224,7 +225,6 @@ def read_fasta_any(path: Path) -> Iterator[Tuple[str, str]]:
         if header is not None:
             yield header, "".join(chunks)
 
-
 def find_files(root: Path, suffixes: List[str]) -> List[Path]:
     if root.is_file():
         return [root]
@@ -243,6 +243,140 @@ def standard_plasmid_id(fp: Path) -> str:
         name = name[:-3]               # drop .gz
     return Path(name).stem             # drop .fa/.fasta/.fna/.fas
 
+# ── Reverse-complement support (no external deps) ────────────────────────
+_RC = str.maketrans("ACGTUNacgtun", "TGCAANtgcaan")
+
+def reverse_complement(s: str) -> str:
+    return s.translate(_RC)[::-1]
+
+def map_rc_positions_to_fwd(rc_positions: List[int], match_len: int, n: int, circular: bool) -> List[int]:
+    """
+    Map start positions from the reverse-complement string back to forward-strand
+    0-based coordinates. For a match of length L that begins at p_rc in RC(s),
+    the forward coordinate is: p_fwd = n - (p_rc + L). Circular wraps modulo n.
+    """
+    if n <= 0:
+        return []
+    out = []
+    seen = set()
+    for p_rc in rc_positions:
+        p = n - (p_rc + match_len)
+        if circular:
+            p %= n
+        if 0 <= p < n and p not in seen:
+            seen.add(p)
+            out.append(p)
+    out.sort()
+    return out
+
+def find_direct_and_inverted_longest(seq: str, circular: bool, min_len: int):
+    # Direct (same-orientation) exact repeats — unchanged:
+    direct = find_longest_repeats(seq, circular=circular, min_len=min_len, top_n=0)["longest"]
+
+    # Inverted (reverse-complement) exact repeats — cross-compare s vs rc(s):
+    inverted = find_longest_inverted_repeat(seq, circular=circular, min_len=min_len)
+
+    return direct, inverted
+
+def find_longest_inverted_repeat(seq: str, circular: bool = False, min_len: int = 2):
+    """
+    Find the longest exact inverted (reverse-complement) repeat by computing the
+    longest common substring between s (or s+s if circular) and rc(s) (or rc+rc if circular).
+
+    Returns a dict like:
+      {
+        "length": L,
+        "pattern": forward_oriented_pattern,    # from the s-side
+        "positions": [p1, p2, ...],             # all forward-strand starts for both arms
+        "count": K
+      }
+    or None if no inverted repeat exists.
+    """
+    s = seq.upper().replace("U", "T")
+    if len(s) < 2:
+        return None
+
+    n0 = len(s)
+    s2  = s + s if circular else s
+    rc2 = reverse_complement(s)
+    rc2 = rc2 + rc2 if circular else rc2
+
+    SEP = "#"  # not in DNA alphabet
+    T = s2 + SEP + rc2
+    sa = suffix_array(T)
+    lcp = lcp_array(T, sa)
+
+    # Tag each suffix as coming from s2 (0) or rc2 (1) or SEP (-1)
+    len_s2 = len(s2)
+    len_sep = 1
+    def origin(idx):
+        if idx < len_s2:
+            return 0
+        elif idx == len_s2:
+            return -1
+        else:
+            return 1
+
+    best_len = 0
+    best_block_idx = None
+
+    # scan LCP, but only consider adjacent suffixes from different origins (0 vs 1)
+    for i in range(1, len(T)):
+        o1 = origin(sa[i-1]); o2 = origin(sa[i])
+        if o1 == -1 or o2 == -1 or o1 == o2:
+            continue
+        L = lcp[i]
+        if L >= max(min_len, 1) and L >= best_len:
+            best_len = L
+            best_block_idx = i
+
+    if best_len == 0 or best_block_idx is None:
+        return None
+
+    # collect the whole block around best_block_idx with LCP >= best_len
+    starts_block = _collect_block(sa, lcp, best_block_idx, best_len)
+
+    # split starts into s2-side and rc2-side, map to forward coords
+    s2_starts  = []
+    rc2_starts = []
+    for st in starts_block:
+        o = origin(st)
+        if o == 0:
+            s2_starts.append(st)                  # forward orientation directly
+        elif o == 1:
+            rc2_starts.append(st - (len_s2 + len_sep))
+
+    # normalise to [0, n0)
+    def norm_positions_forward(ps):
+        seen = set(); out = []
+        for p in ps:
+            q = p % n0 if circular else p
+            if 0 <= q < n0 and q not in seen:
+                seen.add(q); out.append(q)
+        out.sort()
+        return out
+
+    s2_norm  = norm_positions_forward(s2_starts)
+    # map rc positions to forward coords for the *other arm* starts
+    rc2_norm = map_rc_positions_to_fwd(rc2_starts, best_len, n0, circular)
+
+    # if no valid pair across sides after normalisation, bail
+    if not s2_norm or not rc2_norm:
+        return None
+
+    # pattern: take a representative from s2 side
+    rep = s2_norm[0]
+    pattern = (s + s)[rep:rep + best_len] if circular else s[rep:rep + best_len]
+
+    # merge both arms' forward coordinates for reporting (dedup/sort)
+    merged = sorted(set(s2_norm) | set(rc2_norm))
+
+    return {
+        "length": best_len,
+        "pattern": pattern,       # forward-oriented arm
+        "positions": merged,      # all forward starts of both arms
+        "count": len(merged),
+    }
 
 def main():
     ap = argparse.ArgumentParser(description="Batch longest repeated region scan for FASTA files.")
@@ -253,6 +387,8 @@ def main():
     ap.add_argument("--circular", action="store_true", help="Treat sequences as circular (wrap-around repeats)")
     ap.add_argument("--min-len", type=int, default=2, help="Min length used inside finder for its 'top' list")
     ap.add_argument("--omit-seq", action="store_true", help="Exclude the repeat sequence text from CSV")
+    ap.add_argument("--include-reverse", action="store_true",
+                    help="Also detect inverted (reverse-complement) exact repeats")
     args = ap.parse_args()
 
     root = Path(args.path)
@@ -265,11 +401,19 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [
-        "plasmid_id", "file", "seq_length", "circular",
+        "plasmid_id", "seq_length", "circular",
         "longest_len", "longest_count", "longest_positions", "longest_fraction",
     ]
     if not args.omit_seq:
         fieldnames.append("longest_seq")
+
+    # Extra columns for inverted (reverse-complement) repeats
+    if args.include_reverse:
+        fieldnames.extend([
+            "inv_longest_len", "inv_longest_count", "inv_longest_positions", "inv_longest_fraction",
+        ])
+        if not args.omit_seq:
+            fieldnames.append("inv_longest_seq")
 
     with open(out_path, "w", newline="") as csvfh:
         w = csv.DictWriter(csvfh, fieldnames=fieldnames)
@@ -280,17 +424,17 @@ def main():
             for header, seq in read_fasta_any(fp):
                 seq = seq.upper().replace("U", "T")
                 n0 = len(seq)
-                # Prefer the first token of the FASTA header; fall back to filename.
                 pid = standard_plasmid_id(fp)
 
+                # Run dual-scan (direct + inverted)
+                direct, inverted = find_direct_and_inverted_longest(
+                    seq, circular=args.circular, min_len=args.min_len
+                )
 
-                res = find_longest_repeats(seq, circular=args.circular, min_len=args.min_len, top_n=0)
-                longest = res["longest"]
-
-                if longest is None:
+                # ----- DIRECT (forward) -----
+                if direct is None:
                     row = {
                         "plasmid_id": pid,
-                        "file": str(fp),
                         "seq_length": n0,
                         "circular": bool(args.circular),
                         "longest_len": 0,
@@ -300,29 +444,52 @@ def main():
                     }
                     if not args.omit_seq:
                         row["longest_seq"] = ""
-                    w.writerow(row)
-                    continue
+                else:
+                    Ld = int(direct["length"])
+                    positions_d = direct["positions"]
+                    count_d = int(direct["count"])
+                    frac_d = (Ld / n0) if n0 else 0.0
+                    row = {
+                        "plasmid_id": pid,
+                        "seq_length": n0,
+                        "circular": bool(args.circular),
+                        "longest_len": Ld,
+                        "longest_count": count_d,
+                        "longest_positions": ";".join(map(str, positions_d)),
+                        "longest_fraction": f"{frac_d:.6f}",
+                    }
+                    if not args.omit_seq:
+                        row["longest_seq"] = direct["pattern"]
 
-                L = int(longest["length"])
-                positions = longest["positions"]  # already 0-based
-                count = int(longest["count"])
-                frac = (L / n0) if n0 else 0.0
-                row = {
-                    "plasmid_id": pid,
-                    "file": str(fp),
-                    "seq_length": n0,
-                    "circular": bool(args.circular),
-                    "longest_len": L,
-                    "longest_count": count,
-                    "longest_positions": ";".join(map(str, positions)),
-                    "longest_fraction": f"{frac:.6f}",
-                }
-                if not args.omit_seq:
-                    row["longest_seq"] = longest["pattern"]
+                # ----- INVERTED (reverse-complement), optional -----
+                if args.include_reverse:
+                    if inverted is None:
+                        row.update({
+                            "inv_longest_len": 0,
+                            "inv_longest_count": 0,
+                            "inv_longest_positions": "",
+                            "inv_longest_fraction": 0.0,
+                        })
+                        if not args.omit_seq:
+                            row["inv_longest_seq"] = ""
+                    else:
+                        Li = int(inverted["length"])
+                        positions_i = inverted["positions"]       # mapped to forward coords
+                        count_i = int(inverted["count"])
+                        frac_i = (Li / n0) if n0 else 0.0
+                        row.update({
+                            "inv_longest_len": Li,
+                            "inv_longest_count": count_i,
+                            "inv_longest_positions": ";".join(map(str, positions_i)),
+                            "inv_longest_fraction": f"{frac_i:.6f}",
+                        })
+                        if not args.omit_seq:
+                            # keep the motif as returned from RC pass (RC orientation)
+                            row["inv_longest_seq"] = inverted["pattern"]
+
                 w.writerow(row)
 
     print(f"Wrote: {out_path}  (records: {sum(1 for _ in open(out_path)) - 1})")
-
 
 if __name__ == "__main__":
     main()
