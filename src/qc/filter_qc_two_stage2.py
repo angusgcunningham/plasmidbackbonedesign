@@ -287,10 +287,11 @@ def parse_args():
         description="Two-stage QC with optional repeat gate: (A) count with low thresholds, "
                     "(B) validate with strict thresholds, (C) fail on long repeats."
     )
-    ap.add_argument("--qc_out", required=True,
+    ap.add_argument("--run-name", default=None)
+    ap.add_argument("--qc_out", required=False,
                     help="Folder with aggregate_ori_calls.csv & aggregate_amr_calls.csv, or a single ori CSV path")
-    ap.add_argument("--out_pass", required=True)
-    ap.add_argument("--out_fail", required=True)
+    ap.add_argument("--out_pass", required=False)
+    ap.add_argument("--out_fail", required=False)
 
     # Stage-A (low) thresholds for counting
     ap.add_argument("--ori_low_identity", type=float, default=85.0)
@@ -332,12 +333,32 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
-    qc_out = Path(args.qc_out)
+    if args.qc_out:
+        qc_out = Path(args.qc_out)
+    elif args.run_name:
+        qc_out = Path("runs") / args.run_name / "qc"
+    else:
+        raise SystemExit("Provide --qc_out or --run-name.")
+
+    if args.out_pass:
+        out_pass = Path(args.out_pass)
+    elif args.run_name:
+        out_pass = Path("runs") / args.run_name / "qc" / "passed.csv"
+    else:
+        raise SystemExit("Provide --out_pass or --run-name.")
+
+    if args.out_fail:
+        out_fail = Path(args.out_fail)
+    elif args.run_name:
+        out_fail = Path("runs") / args.run_name / "qc" / "failed.csv"
+    else:
+        raise SystemExit("Provide --out_fail or --run-name.")
+
     repeat_ge = True if (args.repeat_ge or not args.repeat_gt) else False  # default to ≥
     two_stage_filter(
         qc_out=qc_out,
-        out_pass_csv=Path(args.out_pass),
-        out_fail_csv=Path(args.out_fail),
+        out_pass_csv=out_pass,
+        out_fail_csv=out_fail,
         ori_low_id=args.ori_low_identity,
         ori_low_cov=args.ori_low_cov,
         amr_low_id=args.amr_low_identity,
@@ -357,3 +378,10 @@ if __name__ == "__main__":
         repeat_ge=repeat_ge,
         digits=args.digits,
     )
+    passed_ids_path = out_pass.parent / "passed_ids.txt"
+    if out_pass.exists():
+        df_pass = pd.read_csv(out_pass)
+        if "Plasmid_ID" in df_pass.columns:
+            with open(passed_ids_path, "w") as fh:
+                for pid in df_pass["Plasmid_ID"].dropna().astype(str):
+                    fh.write(f"{pid}\n")

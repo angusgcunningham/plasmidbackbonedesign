@@ -1,0 +1,15 @@
+run:
+  name: "testrun"
+
+paths:
+  dataset_input: "data/debug_fasta"
+  tokenizer_json: "models/addgene_trained_dna_tokenizer.json"
+  base_model: "models/pretrained_model.pt"
+  model_output_dir: "runs/testrun/models/ft15k"
+
+generation:
+  num_samples: 50
+
+qc:
+  oridb_prefix: "data/oriVdb/oriV_db"
+  oridb_ref: "data/oriVdb/oriV_refs.fasta"

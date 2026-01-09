@@ -180,3 +180,90 @@ def plot_edit_distance_distribution(real_dists: List[int],
     plt.legend()
     plt.title('Novelty: Edit-Distance Distribution')
     plt.show()
+
+
+def _read_fasta_sequences(path: str) -> list[str]:
+    seqs: list[str] = []
+    p = os.path.abspath(path)
+    if os.path.isdir(p):
+        for fname in os.listdir(p):
+            if not fname.lower().endswith((".fa", ".fasta", ".fna", ".fas")):
+                continue
+            seqs.extend(_read_fasta_sequences(os.path.join(p, fname)))
+        return seqs
+    with open(p, "r") as fh:
+        buf = []
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if buf:
+                    seqs.append("".join(buf))
+                    buf = []
+            else:
+                buf.append(line)
+        if buf:
+            seqs.append("".join(buf))
+    return seqs
+
+
+def main() -> None:
+    import argparse
+    import json
+
+    ap = argparse.ArgumentParser(description="K-mer and sequence stats analysis.")
+    ap.add_argument("--real-fasta")
+    ap.add_argument("--base-fasta")
+    ap.add_argument("--ft-fasta")
+    ap.add_argument("--k", type=int, default=4)
+    ap.add_argument("--out-json")
+    args = ap.parse_args()
+
+    if not (args.real_fasta or args.base_fasta or args.ft_fasta):
+        return
+
+    real = _read_fasta_sequences(args.real_fasta) if args.real_fasta else []
+    base = _read_fasta_sequences(args.base_fasta) if args.base_fasta else []
+    ft = _read_fasta_sequences(args.ft_fasta) if args.ft_fasta else []
+
+    out = {"k": args.k}
+    if real:
+        out["real"] = {
+            "count": len(real),
+            "gc_mean": sum(compute_gc_content(real)) / len(real),
+            "len_mean": sum(compute_sequence_lengths(real)) / len(real),
+        }
+    if base:
+        out["base"] = {
+            "count": len(base),
+            "gc_mean": sum(compute_gc_content(base)) / len(base),
+            "len_mean": sum(compute_sequence_lengths(base)) / len(base),
+        }
+    if ft:
+        out["ft"] = {
+            "count": len(ft),
+            "gc_mean": sum(compute_gc_content(ft)) / len(ft),
+            "len_mean": sum(compute_sequence_lengths(ft)) / len(ft),
+        }
+
+    if real and base:
+        out["js_real_vs_base"] = js_divergence(
+            get_kmer_frequencies(real, args.k),
+            get_kmer_frequencies(base, args.k),
+        )
+    if real and ft:
+        out["js_real_vs_ft"] = js_divergence(
+            get_kmer_frequencies(real, args.k),
+            get_kmer_frequencies(ft, args.k),
+        )
+
+    if args.out_json:
+        with open(args.out_json, "w") as fh:
+            json.dump(out, fh, indent=2)
+    else:
+        print(json.dumps(out, indent=2))
+
+
+if __name__ == "__main__":
+    main()

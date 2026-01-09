@@ -208,6 +208,8 @@ def read_fasta_any(path: Path) -> Iterator[Tuple[str, str]]:
     Minimal FASTA reader for uncompressed or .gz files.
     Yields (header, sequence). Header excludes the leading '>'.
     """
+    if not path.exists():
+        return
     opener = gzip.open if path.suffix == ".gz" else open
     with opener(path, "rt") as fh:
         header, chunks = None, []
@@ -227,11 +229,11 @@ def read_fasta_any(path: Path) -> Iterator[Tuple[str, str]]:
 
 def find_files(root: Path, suffixes: List[str]) -> List[Path]:
     if root.is_file():
-        return [root]
+        return [root] if root.exists() else []
     files = []
     for suf in suffixes:
         files.extend(root.rglob(f"*{suf}"))
-    return sorted(set(files))
+    return sorted({p for p in files if p.exists() and p.is_file()})
 
 def standard_plasmid_id(fp: Path) -> str:
     """
@@ -381,7 +383,8 @@ def find_longest_inverted_repeat(seq: str, circular: bool = False, min_len: int 
 def main():
     ap = argparse.ArgumentParser(description="Batch longest repeated region scan for FASTA files.")
     ap.add_argument("path", type=str, help="Path to a FASTA file or a directory of FASTA files")
-    ap.add_argument("--out", type=str, default="longest_repeats.csv", help="Output CSV path")
+    ap.add_argument("--run-name", default=None)
+    ap.add_argument("--out", type=str, default=None, help="Output CSV path")
     ap.add_argument("--suffixes", type=str, default=".fa,.fasta,.fna,.fas,.fa.gz,.fasta.gz",
                     help="Comma-separated list of file extensions to include")
     ap.add_argument("--circular", action="store_true", help="Treat sequences as circular (wrap-around repeats)")
@@ -397,7 +400,12 @@ def main():
     if not files:
         raise SystemExit(f"No FASTA files found under: {root}")
 
-    out_path = Path(args.out)
+    if args.out:
+        out_path = Path(args.out)
+    elif args.run_name:
+        out_path = Path("runs") / args.run_name / "qc" / "repeats.csv"
+    else:
+        out_path = Path("longest_repeats.csv")
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = [

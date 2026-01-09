@@ -4,6 +4,14 @@ ARGNet/
 evo2/
 Projects/Results/
 Projects/models/
+runs/
+models/
+data/
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
 
 .vscode/settings.json
 
@@ -24,3 +32,9 @@ pigz-2.8/
 *.ntf
 *.njs
 *.pdf
+*.jsonl
+*.log
+*.tmp
+*.temp
+*.swp
+*.DS_Store

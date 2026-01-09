@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import subprocess as sp
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -296,7 +297,7 @@ def process_one(
     Process a single FASTA and return paths and small summaries.
     """
     sample = fasta.stem
-    sdir = outdir / sample
+    sdir = outdir / "individual_sequences_qc" / sample
     ensure_dir(sdir)
 
     # 1) ori BLAST
@@ -361,8 +362,9 @@ def process_one(
 
 def main():
     ap = argparse.ArgumentParser(description="QC pipeline for plasmid sequences.")
-    ap.add_argument("--in", dest="in_path", required=True, help="FASTA file or directory of FASTAs")
-    ap.add_argument("--outdir", required=True, help="Output directory")
+    ap.add_argument("--in", dest="in_path", default=None, help="FASTA file or directory of FASTAs")
+    ap.add_argument("--run-name", default=datetime.now().strftime("%Y%m%d_%H%M%S"))
+    ap.add_argument("--outdir", default=None, help="Output directory")
     ap.add_argument("--oridb_prefix", required=True, help="Prefix/path for ori BLAST DB (nucl)")
     ap.add_argument("--oridb_ref", default=None, help="FASTA of ori references to build DB if missing")
     ap.add_argument("--min_pident", type=float, default=85.0, help="Min % identity for ori hits")
@@ -372,8 +374,9 @@ def main():
     ap.add_argument("--skip_prodigal", action="store_true", help="Skip running Prodigal")
     args = ap.parse_args()
 
-    in_path   = Path(args.in_path)
-    outdir    = Path(args.outdir)
+    run_dir = Path("runs") / args.run_name
+    in_path = Path(args.in_path) if args.in_path else run_dir / "generations"
+    outdir = Path(args.outdir) if args.outdir else run_dir / "qc"
     db_prefix = Path(args.oridb_prefix)
     oridb_ref = Path(args.oridb_ref) if args.oridb_ref else None
 
@@ -429,7 +432,8 @@ def main():
     agg_ori.to_csv(outdir / "aggregate_ori_calls.csv", index=False)
     agg_amr.to_csv(outdir / "aggregate_amr_calls.csv", index=False)
 
-    pd.DataFrame(summaries).to_csv(outdir / "qc_summary.csv", index=False)
+    qc_table = pd.DataFrame(summaries)
+    qc_table.to_csv(outdir / "qc_summary.csv", index=False)
     print("[DONE] QC complete.")
     print(f"  - Aggregate ORIs: {outdir/'aggregate_ori_calls.csv'}")
     print(f"  - Aggregate AMRs: {outdir/'aggregate_amr_calls.csv'}")

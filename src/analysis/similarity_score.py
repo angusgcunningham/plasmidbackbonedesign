@@ -1,6 +1,8 @@
 import subprocess
-import pandas as pd
+import tempfile
 from pathlib import Path
+
+import pandas as pd
 
 # Test on your strict QC passed sequences
 DB_PATH = "/cs/student/projects1/aibh/2024/acunning/plasmid_db"
@@ -132,7 +134,6 @@ def find_closest_match_weighted(query_fasta: Path, db_path: str):
         "closest_avg_identity": avg_id
     }
 
-# === Batch over generated folders, writing one CSV per dataset ===
 GEN_FOLDERS = {
     "base_atg": "/cs/student/projects1/aibh/2024/acunning/Projects/Results/generated_seqs/gen_base_atg",
     "base_gc":  "/cs/student/projects1/aibh/2024/acunning/Projects/Results/generated_seqs/gen_basegfp2",
@@ -143,34 +144,110 @@ GEN_FOLDERS = {
 }
 
 OUTDIR = Path("/cs/student/projects1/aibh/2024/acunning/Projects/Results/similarity_csvs")
-OUTDIR.mkdir(parents=True, exist_ok=True)
 
-for name, folder in GEN_FOLDERS.items():
-    print(f"\nProcessing {name} …")
+
+def _iter_fasta_files(path: Path):
+    if path.is_dir():
+        for fp in path.glob("*.fa*"):
+            yield fp
+    elif path.is_file():
+        yield path
+
+
+def _iter_fasta_records(path: Path):
+    header = None
+    seq = []
+    with path.open() as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith(">"):
+                if header is not None:
+                    yield header, "".join(seq)
+                header = line[1:].strip()
+                seq = []
+            else:
+                seq.append(line)
+        if header is not None:
+            yield header, "".join(seq)
+
+
+def _records_from_input(path: Path):
+    if path.is_dir():
+        for fp in path.glob("*.fa*"):
+            yield fp.stem, fp, False
+    else:
+        for header, seq in _iter_fasta_records(path):
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".fasta", delete=False) as tmp:
+                tmp.write(f">{header}\n{seq}\n")
+                yield header, Path(tmp.name), True
+
+
+def run_similarity(input_path: Path, db_path: str) -> pd.DataFrame:
     records = []
-    for fasta in Path(folder).glob("*.fa*"):  # matches .fa and .fasta
-        plasmid_id = fasta.stem  # e.g., ft15k_generated_sequence_001
+    temp_files = []
+    try:
+        for plasmid_id, fasta, is_temp in _records_from_input(input_path):
+            if is_temp:
+                temp_files.append(fasta)
 
-        # global (top-5) weighted similarity across all subjects/HSPs
-        true_sim = calculate_true_similarity(fasta, DB_PATH)
+            true_sim = calculate_true_similarity(fasta, db_path)
+            best = find_closest_match_weighted(fasta, db_path)
 
-        # closest subject weighted similarity (aggregate all HSPs for that subject)
-        best = find_closest_match_weighted(fasta, DB_PATH)
+            row = {
+                "Plasmid_ID": plasmid_id,
+                "true_similarity": true_sim,
+            }
+            if best:
+                row.update({
+                    "closest_match": best["subject_id"],
+                    "closest_weighted_similarity": best["closest_weighted_similarity"],
+                    "closest_coverage": best["closest_coverage"],
+                    "closest_avg_identity": best["closest_avg_identity"],
+                })
+            records.append(row)
+    finally:
+        for fp in temp_files:
+            try:
+                fp.unlink()
+            except OSError:
+                pass
 
-        row = {
-            "Plasmid_ID": plasmid_id,
-            "true_similarity": true_sim,
-        }
-        if best:
-            row.update({
-                "closest_match": best["subject_id"],
-                "closest_weighted_similarity": best["closest_weighted_similarity"],
-                "closest_coverage": best["closest_coverage"],
-                "closest_avg_identity": best["closest_avg_identity"],
-            })
-        records.append(row)
+    return pd.DataFrame(records)
 
-    df_out = pd.DataFrame(records)
-    out_path = OUTDIR / f"{name}_similarity.csv"
-    df_out.to_csv(out_path, index=False)
-    print(f"→ Saved {len(df_out)} rows to {out_path}")
+
+def main() -> None:
+    import argparse
+    from datetime import datetime
+
+    ap = argparse.ArgumentParser(description="Compute BLAST-based similarity metrics.")
+    ap.add_argument("--input", default=None, help="FASTA file or directory")
+    ap.add_argument("--db-path", default=DB_PATH)
+    ap.add_argument("--run-name", default=None)
+    ap.add_argument("--out-csv", default=None)
+    ap.add_argument("--use-legacy-folders", action="store_true")
+    args = ap.parse_args()
+
+    if args.use_legacy_folders or (args.input is None and args.run_name is None):
+        OUTDIR.mkdir(parents=True, exist_ok=True)
+        for name, folder in GEN_FOLDERS.items():
+            print(f"\nProcessing {name} …")
+            df_out = run_similarity(Path(folder), args.db_path)
+            out_path = OUTDIR / f"{name}_similarity.csv"
+            df_out.to_csv(out_path, index=False)
+            print(f"→ Saved {len(df_out)} rows to {out_path}")
+        return
+
+    run_name = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
+    input_path = Path(args.input) if args.input else Path("runs") / run_name / "generations"
+    out_csv = Path(args.out_csv) if args.out_csv else Path("runs") / run_name / "analysis" / "analysis_summary.csv"
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    df_out = run_similarity(input_path, args.db_path)
+    df_out.to_csv(out_csv, index=False)
+    print(f"→ Saved {len(df_out)} rows to {out_csv}")
+
+
+if __name__ == "__main__":
+    main()

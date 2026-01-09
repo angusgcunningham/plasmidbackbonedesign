@@ -85,16 +85,24 @@ class BasePairLimit(StoppingCriteria):
         return bp_so_far >= self.target_bp
 
 @torch.no_grad()
-def generate_and_save(model, tokenizer, seed_ids, device):
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+def generate_and_save(
+    model,
+    tokenizer,
+    seed_ids,
+    device,
+    output_dir,
+    generations_fasta,
+    metadata_csv,
+):
+    os.makedirs(output_dir, exist_ok=True)
 
     # Precompute once
     bp_per_tok = build_bp_len_table(tokenizer).to(device)
     prompt_len = seed_ids.shape[1]
 
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(output_dir, exist_ok=True)
     run_id   = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(OUTPUT_DIR, f"gen_run_{run_id}.txt")
+    log_path = os.path.join(output_dir, f"gen_run_{run_id}.txt")
     
     # header with all decode + length params
     header = {
@@ -118,6 +126,10 @@ def generate_and_save(model, tokenizer, seed_ids, device):
         fh.write(json.dumps(header, indent=2) + "\n")
         fh.write("\t".join(header["columns"]) + "\n")
 
+    if not os.path.exists(metadata_csv):
+        with open(metadata_csv, "w") as fh:
+            fh.write("plasmid_id,target_bp,raw_bp,final_bp,trimmed,outfile\n")
+
     for i in range(SEQUENCE_NUMBER):
         target_bp = sample_target_bp()
         stop_crit = StoppingCriteriaList([BasePairLimit(bp_per_tok, prompt_len, target_bp)])
@@ -139,22 +151,46 @@ def generate_and_save(model, tokenizer, seed_ids, device):
         final = cut_circular_to_target(bases, target_bp)
 
         trimmed = int(len(final) < len(bases))   # 1 if circular/target trim applied
-        outname = f"ft35k_generated_sequence_{i:03d}.fasta"  # or "base_generated_..."
+        outname = f"base_generated_{i:03d}.fasta"
         with open(log_path, "a") as fh:
             fh.write(f"{i+1}\t{target_bp}\t{len(bases)}\t{len(final)}\t{trimmed}\t{outname}\n")
 
         print(f"[{i+1}/{SEQUENCE_NUMBER}] target≈{target_bp} bp | generated={len(final)} bp")
-        with open(os.path.join(OUTPUT_DIR, f"base_generated_{i:03d}.fasta"), "w") as fh:
-            fh.write(f">BaseModel_generate{i}\n{final}\n")
+        plasmid_id = f"BaseModel_generate{i}"
+        with open(os.path.join(output_dir, outname), "w") as fh:
+            fh.write(f">{plasmid_id}\n{final}\n")
+        with open(generations_fasta, "a") as fh:
+            fh.write(f">{plasmid_id}\n{final}\n")
+        with open(metadata_csv, "a") as fh:
+            fh.write(f"{plasmid_id},{target_bp},{len(bases)},{len(final)},{trimmed},{outname}\n")
 
         if device.type == "cuda":
             torch.cuda.empty_cache()
 
-if __name__ == "__main__":
+def main() -> None:
+    import argparse
+    from datetime import datetime
+    from pathlib import Path
+
+    ap = argparse.ArgumentParser(description="Generate plasmid sequences from base model.")
+    ap.add_argument("--base-pt", default=BASE_PT)
+    ap.add_argument("--tokenizer-json", default=TOKENIZER_JSON)
+    ap.add_argument("--run-name", default=datetime.now().strftime("%Y%m%d_%H%M%S"))
+    ap.add_argument("--preset", default="base")
+    ap.add_argument("--output-dir", default=None)
+    ap.add_argument("--generations-fasta", default=None)
+    ap.add_argument("--metadata-csv", default=None)
+    ap.add_argument("--num-samples", type=int, default=None)
+    args = ap.parse_args()
+
+    if args.num_samples is not None:
+        global SEQUENCE_NUMBER
+        SEQUENCE_NUMBER = args.num_samples
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Device:", device)
 
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file=TOKENIZER_JSON)
+    tokenizer = PreTrainedTokenizerFast(tokenizer_file=args.tokenizer_json)
     # Ensure a pad token; keep EOS as-is if present
     if tokenizer.eos_token is None:
         tokenizer.add_special_tokens({"pad_token": "[PAD]"})
@@ -162,7 +198,14 @@ if __name__ == "__main__":
     else:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model_base = load_base_model(BASE_PT, device)
+    run_dir = Path("runs") / args.run_name
+    output_dir = Path(args.output_dir) if args.output_dir else run_dir / "generations"
+    generations_fasta = args.generations_fasta or str(output_dir / "generations.fasta")
+    metadata_csv = args.metadata_csv or str(output_dir / "generations_metadata.csv")
+    Path(generations_fasta).parent.mkdir(parents=True, exist_ok=True)
+    Path(metadata_csv).parent.mkdir(parents=True, exist_ok=True)
+
+    model_base = load_base_model(args.base_pt, device)
     model_base.resize_token_embeddings(len(tokenizer))
     model_base.config.vocab_size = len(tokenizer)
 
@@ -173,5 +216,17 @@ if __name__ == "__main__":
         add_special_tokens=False
     ).to(device)
 
-    generate_and_save(model_base, tokenizer, seed_ids, device)
-    print(f"✅ Done. Check {OUTPUT_DIR}/base_generated_atg_*.fasta")
+    generate_and_save(
+        model_base,
+        tokenizer,
+        seed_ids,
+        device,
+        str(output_dir),
+        generations_fasta,
+        metadata_csv,
+    )
+    print(f"✅ Done. Check {output_dir}/generations.fasta")
+
+
+if __name__ == "__main__":
+    main()
