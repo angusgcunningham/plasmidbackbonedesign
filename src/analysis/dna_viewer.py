@@ -1,4 +1,4 @@
-# env used: training_generation
+# env used: plasmid-qc
 """dna_viewer.py
 
 Usage examples:
