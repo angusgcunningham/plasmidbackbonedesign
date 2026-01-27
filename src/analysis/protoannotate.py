@@ -60,25 +60,6 @@ def main() -> None:
         for f in failed_files:
             print(f"  - {f}")
 
-'''
-base_dir = "/cs/student/projects1/aibh/2024/acunning/Projects/Data/dataset/fasta"
-json2_dir = "/cs/student/projects1/aibh/2024/acunning/Projects/Results/plannotate/training15k"
-os.makedirs(json2_dir, exist_ok=True)
-
-for fname in os.listdir(base_dir):
-    if fname.endswith(".txt"):
-        continue
-    fasta_file = os.path.join(base_dir, fname)
-    # here we use the correct subcommand: `plannotate batch -i file -o dir`
-    subprocess.run([
-        "plannotate", "batch",
-        "-i", fasta_file,
-        "-o", json2_dir
-    ], check=True)
-
-print("base pLannotate finished →", json2_dir)
-'''
-
 
 if __name__ == "__main__":
     main()
