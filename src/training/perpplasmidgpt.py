@@ -1,23 +1,28 @@
 import argparse
 import gc
 import json
+import math
+import os
 import random
 from datetime import datetime
 from pathlib import Path
 
 import torch
+import wandb
 from Bio import SeqIO
 from datasets import Dataset
 from transformers import (
     DataCollatorWithPadding,
     GenerationConfig,
-    GPT2Config,
-    GPT2LMHeadModel,
     TrainerCallback,
     PreTrainedTokenizerFast,
     Trainer,
     TrainingArguments,
 )
+
+# Avoid tokenizers fork/parallelism warning
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 
 def _sanitize_value(val):
     if isinstance(val, torch.dtype):
@@ -49,7 +54,7 @@ def _sanitize_value(val):
 def sanitize_config(cfg) -> list[str]:
     sanitized = []
     for key, val in list(vars(cfg).items()):
-        new_val, changed, reason = _sanitize_value(val)
+        new_val, changed, _ = _sanitize_value(val)
         if changed:
             sanitized.append(f"{key}({type(val).__name__})")
             setattr(cfg, key, new_val)
@@ -62,6 +67,30 @@ def sanitize_config(cfg) -> list[str]:
     return sanitized
 
 
+def _stringify_dtypes(obj):
+    if isinstance(obj, torch.dtype):
+        return str(obj).replace("torch.", "")
+    if callable(obj):
+        name = getattr(obj, "__name__", None)
+        return name if isinstance(name, str) else repr(obj)
+    if isinstance(obj, dict):
+        return {k: _stringify_dtypes(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_stringify_dtypes(v) for v in obj]
+    return obj
+
+
+def _sanitize_config_inplace(cfg) -> None:
+    if cfg is None:
+        return
+    for key in list(cfg.__dict__.keys()):
+        val = cfg.__dict__.get(key)
+        if key.startswith("to_") or callable(val):
+            del cfg.__dict__[key]
+            continue
+        cfg.__dict__[key] = _stringify_dtypes(val)
+
+
 class SanitizeConfigCallback(TrainerCallback):
     def __init__(self):
         self._reported = False
@@ -70,35 +99,25 @@ class SanitizeConfigCallback(TrainerCallback):
         model = kwargs.get("model")
         if model is None:
             return control
-        sanitized = []
-        if getattr(model, "config", None) is not None:
-            sanitized.extend(sanitize_config(model.config))
-        if getattr(model, "generation_config", None) is not None:
-            sanitized.extend(sanitize_config(model.generation_config))
-        if sanitized and not self._reported:
-            print(f"[config] sanitized on save: {', '.join(sanitized)}")
+        _sanitize_config_inplace(getattr(model, "config", None))
+        _sanitize_config_inplace(getattr(model, "generation_config", None))
+        if not self._reported:
+            print("[config] sanitized on save")
             self._reported = True
         return control
 
-def _load_state_dict(model_path: str) -> dict:
-    obj = torch.load(model_path, map_location="cpu", weights_only=False)
-    if hasattr(obj, "state_dict"):
-        return obj.state_dict()
-    if isinstance(obj, dict):
-        return obj
-    raise TypeError("Unsupported model checkpoint type; expected state_dict or model object.")
-
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Fine-tune GPT-2 on plasmid FASTA (15k).")
+    ap = argparse.ArgumentParser(description="Fine-tune GPT-2 on plasmid FASTA (perplexity eval, full-seq).")
     ap.add_argument("--fasta-dir", default="<PATH TO FASTA FILES>")
     ap.add_argument("--tokenizer-json", default="PATH TO TOKENIZER JSON FILE")
     ap.add_argument("--model-path", default="<PATH TO MODEL FILE>")
     ap.add_argument("--run-name", default=datetime.now().strftime("%Y%m%d_%H%M%S"))
-    ap.add_argument("--preset", default="ft15k")
+    ap.add_argument("--preset", default="ft35k_perp")
     ap.add_argument("--output-dir", default=None)
     ap.add_argument("--save-dir", default=None)
-    ap.add_argument("--num-epochs", type=float, default=None)
+    ap.add_argument("--num-epochs", type=float, default=3.0)
+    ap.add_argument("--eval-steps", type=int, default=int(os.environ.get("EVAL_STEPS", "200")))
     args = ap.parse_args()
 
     # delete any lingering references
@@ -123,7 +142,7 @@ def main() -> None:
     ds = Dataset.from_list(examples)
 
     # Context window
-    ctx = 2048
+    CTX = 2048
 
     tokenizer = PreTrainedTokenizerFast(tokenizer_file=args.tokenizer_json)
 
@@ -154,13 +173,13 @@ def main() -> None:
         for ex in batch:
             ids = ex["input_ids"]
             n = len(ids)
-            if n <= ctx:
+            if n <= CTX:
                 cropped.append(ids)  # short: keep whole; base collator will pad within-batch
             else:
                 # circular crop in token space
                 start = random.randint(0, n - 1)
                 ids2 = ids + ids  # allow wraparound
-                cropped.append(ids2[start:start + ctx])
+                cropped.append(ids2[start:start + CTX])
         # dynamic padding to max length in batch
         b = _base_pad([{"input_ids": x} for x in cropped])
         labels = b["input_ids"].clone()
@@ -172,34 +191,26 @@ def main() -> None:
     # Device
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Load checkpoint first to infer model dims
-    state_dict = _load_state_dict(args.model_path)
-    wte = state_dict.get("transformer.wte.weight")
-    wpe = state_dict.get("transformer.wpe.weight")
-    if wte is None or wpe is None:
-        raise KeyError("Checkpoint missing transformer.wte.weight or transformer.wpe.weight")
-    vocab_size = wte.shape[0]
-    n_positions = wpe.shape[0]
-    n_embd = wte.shape[1]
+    # Load the model object directly
+    model = torch.load(
+        args.model_path,
+        map_location=device,
+        weights_only=False
+    ).to(device)
+    old_vocab_size = model.get_input_embeddings().weight.shape[0]
+    new_vocab_size = len(tokenizer)
 
-    cfg = GPT2Config(
-        vocab_size=vocab_size,
-        n_positions=n_positions,
-        n_ctx=n_positions,
-        n_embd=n_embd,
-        n_layer=12,
-        n_head=12,
-    )
-    model = GPT2LMHeadModel(cfg).to(device)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if missing or unexpected:
-        print(f"Missing keys: {len(missing)} | Unexpected keys: {len(unexpected)}")
+    if old_vocab_size != new_vocab_size:
+        print(f"Resizing embeddings from {old_vocab_size} → {new_vocab_size}")
+        model.resize_token_embeddings(new_vocab_size)
+    else:
+        print("Embedding size already matches tokenizer.")
 
-    if len(tokenizer) < vocab_size:
-        extra = vocab_size - len(tokenizer)
-        tokenizer.add_special_tokens({"additional_special_tokens": [f"<extra_{i}>" for i in range(extra)]})
-    if len(tokenizer) != vocab_size:
-        model.resize_token_embeddings(len(tokenizer))
+    print("Final embedding size:", model.get_input_embeddings().weight.shape[0])
+    # Optional mixed-precision / checkpointing tweaks (kept commented on purpose)
+    # if device == "cuda":
+    #     model = model.half()
+    #     model.gradient_checkpointing_enable()
 
     from transformers.models.gpt2.modeling_gpt2 import GPT2Attention
 
@@ -211,8 +222,21 @@ def main() -> None:
         if not hasattr(module, "_attn_implementation"):
             module._attn_implementation = None
 
+    class DummyGenConfig:
+        def __getattr__(self, name):
+            return None
+
+    # Attach the dummy to model
+    model.generation_config = DummyGenConfig()
+
+    # Verify no blow ups:
+    print("min_p:", model.generation_config.min_p)
+    print("anything_else:", model.generation_config.foo_bar)
+
     # Disable cache
     model.config.use_cache = False
+    # Some older GPT2Config objects lack internal _output_attentions/_output_hidden_states.
+    # Set them explicitly to avoid AttributeError in forward.
     if not hasattr(model.config, "_output_attentions"):
         model.config._output_attentions = False
     if not hasattr(model.config, "_output_hidden_states"):
@@ -224,23 +248,29 @@ def main() -> None:
     model.generation_config = GenerationConfig()
     sanitize_config(model.config)
     sanitize_config(model.generation_config)
+    _sanitize_config_inplace(model.config)
+    _sanitize_config_inplace(model.generation_config)
 
     # Quick error check:
     print("use_cache:", model.config.use_cache)
     print("min_p attribute:", getattr(model.generation_config, "min_p"))
     print("dummy gen config is callable?", callable(model.generation_config))
 
+    # Create a 95/5 train/test split for perplexity evaluation
+    split = tok_ds.train_test_split(test_size=0.05, seed=42, shuffle=True)
+    train_ds = split["train"]
+    test_ds = split["test"]
+
     run_dir = Path("runs") / args.run_name
     save_dir = Path(args.save_dir) if args.save_dir else run_dir / "models" / args.preset
     output_dir = Path(args.output_dir) if args.output_dir else save_dir / "trainer"
 
     # TrainingArguments & Trainer
-    num_epochs = args.num_epochs if args.num_epochs is not None else 3
     train_args = TrainingArguments(
         output_dir=str(output_dir),
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
-        num_train_epochs=num_epochs,
+        num_train_epochs=args.num_epochs,
         gradient_checkpointing=True,
         fp16=False,
         logging_steps=100,
@@ -250,15 +280,36 @@ def main() -> None:
         warmup_steps=500,
         group_by_length=True,             # bucket by 'length'
         dataloader_num_workers=2,
+        report_to="wandb",
+        run_name=os.environ.get("WANDB_RUN_NAME", args.run_name),
     )
 
     trainer = Trainer(
         model=model,
         args=train_args,
-        train_dataset=tok_ds,             # full sequences
+        train_dataset=train_ds,           # full sequences
+        eval_dataset=test_ds,             # 5% perplexity test set
         data_collator=data_collator,      # random circular crop → one window/plasmid/step
         callbacks=[SanitizeConfigCallback()],
     )
+
+    class PeriodicEvalCallback(TrainerCallback):
+        def __init__(self, trainer, eval_steps):
+            self.trainer = trainer
+            self.eval_steps = eval_steps
+
+        def on_step_end(self, args, state, control, **kwargs):
+            if state.global_step > 0 and state.global_step % self.eval_steps == 0:
+                metrics = self.trainer.evaluate(eval_dataset=test_ds)
+                if "eval_loss" in metrics and metrics["eval_loss"] is not None:
+                    try:
+                        ppl = math.exp(metrics["eval_loss"])
+                    except OverflowError:
+                        ppl = float("inf")
+                    wandb.log({"eval/perplexity": ppl})
+            return control
+
+    trainer.add_callback(PeriodicEvalCallback(trainer, args.eval_steps))
 
     print("CUDA available:", torch.cuda.is_available())
     print("CUDA device count:", torch.cuda.device_count())
@@ -271,6 +322,16 @@ def main() -> None:
 
     # Train
     trainer.train()
+
+    # Evaluate perplexity on the 5% test split
+    metrics = trainer.evaluate(eval_dataset=test_ds)
+    if "eval_loss" in metrics and metrics["eval_loss"] is not None:
+        try:
+            ppl = math.exp(metrics["eval_loss"])
+        except OverflowError:
+            ppl = float("inf")
+        print(f"Perplexity on 5% test set: {ppl}")
+        wandb.log({"eval/perplexity": ppl})
 
     # Save
     trainer.save_model(str(save_dir))

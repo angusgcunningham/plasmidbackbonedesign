@@ -1,27 +1,27 @@
 run:
-  name: "sample_ft"
-  dir: "runs/sample_ft"
+  name: "ft15k"
+  dir: "runs/ft15k"
 
 paths:
   dataset_input: "data/train_fasta"
-  tokenizer_json: "/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/models/2-ft15kplasmidgpt-maxtok50-tested-complete/tokenizer.json"
-  base_model: null
-  model_output_dir: "/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/models/2-ft15kplasmidgpt-maxtok50-tested-complete"
-  generation_output_dir: "runs/sample_ft/generations"
-  qc_output_dir: "runs/sample_ft/qc"
-  analysis_output_dir: "runs/sample_ft/analysis"
+  tokenizer_json: "models/tokenizer.json"
+  base_model: "models/base_model.pt"
+  model_output_dir: "runs/ft15k/models/ft15k"
+  generation_output_dir: "runs/ft15k/generations"
+  qc_output_dir: "runs/ft15k/qc"
+  analysis_output_dir: "runs/ft15k/analysis"
 
 training:
   ctx: 2048
-  stride: 1024
-  epochs: null
-  batch_size: null
-  grad_accum: null
-  learning_rate: null
+  stride: null
+  epochs: 3
+  batch_size: 1
+  grad_accum: 8
+  learning_rate: 5e-5
 
 generation:
   seed: "ATG"
-  num_samples: 100
+  num_samples: 1000
   target_mean_bp: 4000
   target_spread_bp: 1500
   temperature: 1.05
@@ -45,12 +45,12 @@ qc:
     amr_low_identity: 85.0
     amr_low_cov: 80.0
     amr_low_count_min: 1
-    amr_low_count_max: 1
-    ori_strict_identity: 99.0
-    ori_strict_cov: 99.0
-    amr_strict_identity: 100.0
-    amr_strict_cov: 100.0
-    amr_strict_min: null
+    amr_low_count_max: 2
+    ori_strict_identity: 95.0
+    ori_strict_cov: 95.0
+    amr_strict_identity: 99.0
+    amr_strict_cov: 99.0
+    amr_strict_min: 1
     amr_strict_all: false
 
 analysis:

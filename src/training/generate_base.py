@@ -51,6 +51,16 @@ def sample_target_bp(mean=TARGET_MEAN_BP, spread=TARGET_SPREAD_BP):
 def strip_to_acgtn(s: str) -> str:
     return re.sub(r"[^ACGTNacgtn]", "", s).upper()
 
+def load_fasta_sequence(path: str) -> str:
+    seq = []
+    with open(path, "r") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith(">"):
+                continue
+            seq.append(line)
+    return strip_to_acgtn("".join(seq))
+
 def cut_circular_to_target(bases: str, target_bp: int, seed_len=64, min_frac=0.6, max_frac=1.4):
     """Prefer to stop where the starting seed reappears (circular closure)."""
     if len(bases) <= target_bp:
@@ -89,17 +99,18 @@ def generate_and_save(
     model,
     tokenizer,
     seed_ids,
+    seed_label,
+    seed_len_bp,
     device,
     output_dir,
     generations_fasta,
     metadata_csv,
+    run_name,
 ):
     os.makedirs(output_dir, exist_ok=True)
 
     # Precompute once
     bp_per_tok = build_bp_len_table(tokenizer).to(device)
-    prompt_len = seed_ids.shape[1]
-
     os.makedirs(output_dir, exist_ok=True)
     run_id   = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(output_dir, f"gen_run_{run_id}.txt")
@@ -109,7 +120,8 @@ def generate_and_save(
         "run_id": run_id,
         "model": FT_MODEL_DIR if "FT_MODEL_DIR" in globals() else BASE_PT,
         "tokenizer": TOKENIZER_FILE if "TOKENIZER_FILE" in globals() else TOKENIZER_JSON,
-        "seed_len_bp": len(START_SEQUENCE),
+        "seed_label": seed_label,
+        "seed_len_bp": seed_len_bp,
         "settings": {
             "target_mean_bp": TARGET_MEAN_BP if "TARGET_MEAN_BP" in globals() else None,
             "target_spread_bp": TARGET_SPREAD_BP if "TARGET_SPREAD_BP" in globals() else None,
@@ -131,6 +143,7 @@ def generate_and_save(
             fh.write("plasmid_id,target_bp,raw_bp,final_bp,trimmed,outfile\n")
 
     for i in range(SEQUENCE_NUMBER):
+        prompt_len = seed_ids.shape[1]
         target_bp = sample_target_bp()
         stop_crit = StoppingCriteriaList([BasePairLimit(bp_per_tok, prompt_len, target_bp)])
 
@@ -151,12 +164,12 @@ def generate_and_save(
         final = cut_circular_to_target(bases, target_bp)
 
         trimmed = int(len(final) < len(bases))   # 1 if circular/target trim applied
-        outname = f"base_generated_{i:03d}.fasta"
+        outname = f"{run_name}_{i+1:04d}.fasta"
         with open(log_path, "a") as fh:
             fh.write(f"{i+1}\t{target_bp}\t{len(bases)}\t{len(final)}\t{trimmed}\t{outname}\n")
 
         print(f"[{i+1}/{SEQUENCE_NUMBER}] target≈{target_bp} bp | generated={len(final)} bp")
-        plasmid_id = f"BaseModel_generate{i}"
+        plasmid_id = f"{run_name}_{i+1:04d}"
         with open(os.path.join(output_dir, outname), "w") as fh:
             fh.write(f">{plasmid_id}\n{final}\n")
         with open(generations_fasta, "a") as fh:
@@ -181,6 +194,9 @@ def main() -> None:
     ap.add_argument("--generations-fasta", default=None)
     ap.add_argument("--metadata-csv", default=None)
     ap.add_argument("--num-samples", type=int, default=None)
+    ap.add_argument("--seed", default=START_SEQUENCE)
+    ap.add_argument("--seed-choice", choices=["ATG", "GFP", "both"], default="ATG")
+    ap.add_argument("--seed-fasta", default=None, help="FASTA file for GFP seed.")
     args = ap.parse_args()
 
     if args.num_samples is not None:
@@ -199,33 +215,56 @@ def main() -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
     run_dir = Path("runs") / args.run_name
-    output_dir = Path(args.output_dir) if args.output_dir else run_dir / "generations"
-    generations_fasta = args.generations_fasta or str(output_dir / "generations.fasta")
-    metadata_csv = args.metadata_csv or str(output_dir / "generations_metadata.csv")
-    Path(generations_fasta).parent.mkdir(parents=True, exist_ok=True)
-    Path(metadata_csv).parent.mkdir(parents=True, exist_ok=True)
+    base_output_dir = Path(args.output_dir) if args.output_dir else run_dir / "generations"
 
     model_base = load_base_model(args.base_pt, device)
     model_base.resize_token_embeddings(len(tokenizer))
     model_base.config.vocab_size = len(tokenizer)
 
-    # Seed prompt (no ad-hoc unseen special tokens)
-    seed_ids = tokenizer.encode(
-        START_SEQUENCE.upper(),
-        return_tensors="pt",
-        add_special_tokens=False
-    ).to(device)
+    seed_atg = args.seed or START_SEQUENCE
+    seed_choice = args.seed_choice
+    seed_labels = []
+    seed_seqs = []
+    if seed_choice in ("GFP", "both"):
+        if not args.seed_fasta:
+            raise ValueError("--seed-fasta is required when seed-choice is GFP or both.")
+        gfp_seed = load_fasta_sequence(args.seed_fasta)
+    else:
+        gfp_seed = None
+    if seed_choice in ("ATG", "both"):
+        seed_labels.append("ATG")
+        seed_seqs.append(seed_atg)
+    if seed_choice in ("GFP", "both"):
+        seed_labels.append("GFP")
+        seed_seqs.append(gfp_seed)
+    seed_ids_list = [
+        tokenizer.encode(
+            seq.upper(),
+            return_tensors="pt",
+            add_special_tokens=False,
+        ).to(device)
+        for seq in seed_seqs
+    ]
+    seed_lengths = [len(seq) for seq in seed_seqs]
 
-    generate_and_save(
-        model_base,
-        tokenizer,
-        seed_ids,
-        device,
-        str(output_dir),
-        generations_fasta,
-        metadata_csv,
-    )
-    print(f"✅ Done. Check {output_dir}/generations.fasta")
+    for seed_ids, seed_label, seed_len in zip(seed_ids_list, seed_labels, seed_lengths):
+        out_dir = base_output_dir / f"gen_{args.run_name}_{seed_label}"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        generations_fasta = str(out_dir / "generations.fasta")
+        metadata_csv = str(out_dir / "generations_metadata.csv")
+        generate_and_save(
+            model_base,
+            tokenizer,
+            seed_ids,
+            seed_label,
+            seed_len,
+            device,
+            str(out_dir),
+            generations_fasta,
+            metadata_csv,
+            args.run_name,
+        )
+    print(f"✅ Done. Check {base_output_dir}")
 
 
 if __name__ == "__main__":

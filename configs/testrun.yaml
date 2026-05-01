@@ -1,15 +1,73 @@
 run:
   name: "testrun"
+  dir: "runs/testrun"
 
 paths:
   dataset_input: "data/debug_fasta"
   tokenizer_json: "models/addgene_trained_dna_tokenizer.json"
   base_model: "models/pretrained_model.pt"
-  model_output_dir: "runs/testrun/models/ft15k"
+  model_output_dir: "runs/testrun/models/testrun"
+  generation_output_dir: "runs/testrun/generations"
+  qc_output_dir: "runs/testrun/qc"
+  analysis_output_dir: "runs/testrun/analysis"
+
+training:
+  ctx: 2048
+  stride: null
+  epochs: 1
+  batch_size: 1
+  grad_accum: 8
+  learning_rate: 5e-5
 
 generation:
-  num_samples: 50
+  seed: "ATG"
+  seed_choice: "ATG"
+  gfp_seed_fasta: "/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/data/cassette/GFP_cassette.fasta"
+  num_samples: 10
+  target_mean_bp: 4000
+  target_spread_bp: 1500
+  temperature: 1.05
+  top_p: 0.95
+  repetition_penalty: 1.05
+  max_new_tokens: 12000
 
 qc:
   oridb_prefix: "data/oriVdb/oriV_db"
   oridb_ref: "data/oriVdb/oriV_refs.fasta"
+  min_pident: 85.0
+  min_scovs: 80.0
+  min_len: 100
+  threads: 4
+  skip_prodigal: false
+  filter_profile: "real"
+  filter_profiles:
+    real:
+      ori_low_identity: 85.0
+      ori_low_cov: 80.0
+      ori_low_count_min: 1
+      ori_low_count_max: 1
+      amr_low_identity: 85.0
+      amr_low_cov: 80.0
+      amr_low_count_min: 1
+      amr_low_count_max: 2
+      ori_strict_identity: 95.0
+      ori_strict_cov: 95.0
+      amr_strict_identity: 99.0
+      amr_strict_cov: 99.0
+      amr_strict_min: 1
+      amr_strict_all: false
+    strict:
+      ori_low_identity: 85.0
+      ori_low_cov: 80.0
+      ori_low_count_min: 1
+      ori_low_count_max: 1
+      amr_low_identity: 85.0
+      amr_low_cov: 80.0
+      amr_low_count_min: 1
+      amr_low_count_max: 1
+      ori_strict_identity: 99.0
+      ori_strict_cov: 99.0
+      amr_strict_identity: 100.0
+      amr_strict_cov: 100.0
+      amr_strict_min: 1
+      amr_strict_all: false

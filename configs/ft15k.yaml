@@ -3,9 +3,9 @@ run:
   dir: "runs/ft15k"
 
 paths:
-  dataset_input: "data/train_fasta"
-  tokenizer_json: "models/tokenizer.json"
-  base_model: "models/base_model.pt"
+  dataset_input: "/home/acunningham/Projects/msc_plasmid/plasmid_training_data/dataset/ft15k"
+  tokenizer_json: "/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/models/2-ft15kplasmidgpt-maxtok50-tested-complete/tokenizer.json"
+  base_model: "/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/models/pretrained_model.pt"
   model_output_dir: "runs/ft15k/models/ft15k"
   generation_output_dir: "runs/ft15k/generations"
   qc_output_dir: "runs/ft15k/qc"
@@ -21,6 +21,8 @@ training:
 
 generation:
   seed: "ATG"
+  seed_choice: "ATG"
+  gfp_seed_fasta: "/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/data/cassette/GFP_cassette.fasta"
   num_samples: 1000
   target_mean_bp: 4000
   target_spread_bp: 1500
@@ -37,30 +39,35 @@ qc:
   min_len: 100
   threads: 4
   skip_prodigal: false
-  filter:
-    ori_low_identity: 85.0
-    ori_low_cov: 80.0
-    ori_low_count_min: 1
-    ori_low_count_max: 1
-    amr_low_identity: 85.0
-    amr_low_cov: 80.0
-    amr_low_count_min: 1
-    amr_low_count_max: 2
-    ori_strict_identity: 99.0
-    ori_strict_cov: 99.0
-    amr_strict_identity: 100.0
-    amr_strict_cov: 100.0
-    amr_strict_min: 1
-    amr_strict_all: false
-
-analysis:
-  similarity:
-    db_path: "data/plasmid_db"
-    max_target_seqs: 5
-  metadata:
-    enabled: true
-  kmer:
-    k: 4
-  plannotate:
-    enabled: false
-    yaml_file: null
+  filter_profile: "real"
+  filter_profiles:
+    real:
+      ori_low_identity: 85.0
+      ori_low_cov: 80.0
+      ori_low_count_min: 1
+      ori_low_count_max: 1
+      amr_low_identity: 85.0
+      amr_low_cov: 80.0
+      amr_low_count_min: 1
+      amr_low_count_max: 2
+      ori_strict_identity: 95.0
+      ori_strict_cov: 95.0
+      amr_strict_identity: 99.0
+      amr_strict_cov: 99.0
+      amr_strict_min: 1
+      amr_strict_all: false
+    strict:
+      ori_low_identity: 85.0
+      ori_low_cov: 80.0
+      ori_low_count_min: 1
+      ori_low_count_max: 1
+      amr_low_identity: 85.0
+      amr_low_cov: 80.0
+      amr_low_count_min: 1
+      amr_low_count_max: 1
+      ori_strict_identity: 99.0
+      ori_strict_cov: 99.0
+      amr_strict_identity: 100.0
+      amr_strict_cov: 100.0
+      amr_strict_min: 1
+      amr_strict_all: false

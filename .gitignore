@@ -38,3 +38,6 @@ pigz-2.8/
 *.temp
 *.swp
 *.DS_Store
+*.json
+*.wandb
+wandb/

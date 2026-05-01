@@ -1,0 +1,56 @@
+python /home/acunningham/Projects/msc_plasmid/src/analysis/identity.py \
+  --generated /home/acunningham/Projects/msc_plasmid/Results/generated_seqs/gen_ft15kgfp_p \
+  --training /home/acunningham/Projects/msc_plasmid/plasmid_training_data/dataset/ft35k_dataset \
+  --db /home/acunningham/Projects/msc_plasmid/dbs/plamiddb \
+  --output /home/acunningham/Projects/msc_plasmid/Results/ANI/ani.csv
+
+python /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/src/analysis/dna_viewer.py \
+  --tokenizer-path /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/models/2-ft15kplasmidgpt-maxtok50-tested-complete/tokenizer.json \
+  --gbk-dir /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/runs/ft15k_maxtok50_run/plannotate \
+  --output /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/runs/ft15k_maxtok50_run/linear_plots_all_sequences.pdf
+
+
+training-> analysis full ft15
+# Sampling (generation)
+conda activate training_generation
+cd /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign
+python main.py --mode sample --sampling-preset ft --config configs/sample_ft_custom.yaml --run-name ft15k_maxtok50_run
+
+# Analysis
+conda activate plasmid-qc
+cd /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign
+python main.py --mode analysis --config configs/sample_ft_custom.yaml --run-name ft15k_maxtok50_run
+
+# QC
+conda activate plasmid-qc
+cd /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign
+python main.py --mode qc --config configs/sample_ft_custom.yaml --run-name ft15k_maxtok50_run
+
+ft35k
+
+# Train (GPU env)
+conda activate training_generation
+cd /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign
+python main.py --mode train --preset ft35k_perp --config configs/ft35k_maxtok50_e1p25.yaml --run-name ft35k_maxtok50_e1p25
+
+# Sample (GPU env)
+conda activate training_generation
+cd /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign
+python main.py --mode sample --sampling-preset ft --config configs/ft35k_maxtok50_e1p25.yaml --run-name ft35k_maxtok50_e1p25
+
+# Analysis (QC env)
+conda activate plasmid-qc
+cd /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign
+python main.py --mode analysis --config configs/ft35k_maxtok50_e1p25.yaml --run-name ft35k_maxtok50_e1p25
+
+# QC (QC env)
+conda activate plasmid-qc
+cd /home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign
+python main.py --mode qc --config configs/ft35k_maxtok50_e1p25.yaml --run-name ft35k_maxtok50_e1p25
+
+
+################################
+evo2 checking through files
+################################
+
+ATG_DIR="/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/runs/ft15k_tok50/generations/gen_ft15k_tok50_ATG"; GFP_DIR="/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/runs/ft15k_tok50/generations/gen_ft15k_tok50_GFP"; RANDTOK_DIR="/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/runs/20260220_093942/generations"; OUT_DIR="/home/acunningham/Projects/plasmidbackbonedesign/plasmidbackbonedesign/evo2_src/results/evo2_scores"; mkdir -p "$OUT_DIR"/{atg,gfp,randtok}; for f in "$ATG_DIR"/*.fasta; do python score_evo2_fasta.py --fasta "$f" --out_csv "$OUT_DIR/atg/$(basename "${f%.fasta}").csv" --model_name evo2_1b_base; done; for f in "$GFP_DIR"/*.fasta; do python score_evo2_fasta.py --fasta "$f" --out_csv "$OUT_DIR/gfp/$(basename "${f%.fasta}").csv" --model_name evo2_1b_base; done; for f in "$RANDTOK_DIR"/*.fasta; do python score_evo2_fasta.py --fasta "$f" --out_csv "$OUT_DIR/randtok/$(basename "${f%.fasta}").csv" --model_name evo2_1b_base; done
